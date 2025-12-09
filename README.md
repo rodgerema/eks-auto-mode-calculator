@@ -419,6 +419,19 @@ Selecciona opción [1/2]: 2
   • EKS Auto Mode incluye fee del 12% sobre costos de EC2
   • Estimación asume mejora del 20% en bin packing
   • Ahorro operativo: 10h/mes × $50/h
+
+============================================================
+🔗 REFERENCIAS DE PRICING
+============================================================
+  EC2 Pricing (m5.xlarge):
+    https://aws.amazon.com/ec2/pricing/on-demand/
+
+  EKS Control Plane Pricing:
+    https://aws.amazon.com/eks/pricing/
+
+  EKS Auto Mode Pricing:
+    https://docs.aws.amazon.com/eks/latest/userguide/automode.html
+============================================================
 ```
 
 ## Variables de Entorno
@@ -431,6 +444,8 @@ El recolector genera las siguientes variables:
 | `EKS_NODE_COUNT` | Número total de nodos | `8` |
 | `EKS_UTIL_CPU` | % Utilización CPU (requests/capacity) | `45.30` |
 | `EKS_UTIL_MEM` | % Utilización RAM (requests/capacity) | `62.15` |
+| `AWS_REGION` | Región del cluster | `us-east-1` |
+| `EKS_MONTHLY_COST` | Costo real de Cost Explorer (opcional) | `1200.50` |
 
 ## Notas Importantes
 
@@ -479,6 +494,15 @@ Excelente candidato para Auto Mode. Potencial para:
 - Mejor aprovechamiento de recursos
 
 ## Troubleshooting
+
+### Error: "Timeout: El recolector tardó más de 30 segundos"
+
+El script `analizar_eks.py` tiene un timeout de 30 segundos para el recolector con kubectl. Si tu cluster es muy grande:
+```bash
+# Ejecuta manualmente sin timeout
+eval $(python3 recolector_eks.py)
+python3 calculadora_eks.py
+```
 
 ### Error: "Error cargando configuración de K8s"
 

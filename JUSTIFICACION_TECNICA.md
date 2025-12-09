@@ -2,7 +2,7 @@
 
 Este documento justifica cada cálculo realizado en la calculadora con referencias a documentación oficial de AWS y Kubernetes.
 
-**Última actualización:** Diciembre 2025
+**Última actualización:** Diciembre 2024
 
 ---
 
@@ -28,12 +28,15 @@ El script intenta obtener métricas reales de utilización desde **CloudWatch Co
 
 ```python
 cloudwatch = boto3.client('cloudwatch', region_name=region)
+end_time = datetime.now(datetime.UTC) if hasattr(datetime, 'UTC') else datetime.utcnow()
+start_time = end_time - timedelta(days=7)
+
 response = cloudwatch.get_metric_statistics(
     Namespace='ContainerInsights',
     MetricName='node_cpu_utilization',
     Dimensions=[{'Name': 'ClusterName', 'Value': cluster_name}],
-    StartTime=datetime.utcnow() - timedelta(days=7),
-    EndTime=datetime.utcnow(),
+    StartTime=start_time,
+    EndTime=end_time,
     Period=3600,
     Statistics=['Average']
 )
@@ -77,7 +80,7 @@ El cálculo de utilización basado en `requests/capacity` representa la **utiliz
 El script consulta la **AWS Price List API** para obtener precios actuales:
 
 ```python
-def obtener_precio_aws(instance_type, region='us-east-1'):
+def obtener_precio_ec2_aws(instance_type, region='us-east-1'):
     pricing_client = boto3.client('pricing', region_name='us-east-1')
     response = pricing_client.get_products(
         ServiceCode='AmazonEC2',
@@ -86,6 +89,7 @@ def obtener_precio_aws(instance_type, region='us-east-1'):
             {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': region_map[region]},
             {'Type': 'TERM_MATCH', 'Field': 'operatingSystem', 'Value': 'Linux'},
             {'Type': 'TERM_MATCH', 'Field': 'tenancy', 'Value': 'Shared'},
+            {'Type': 'TERM_MATCH', 'Field': 'capacitystatus', 'Value': 'Used'},
             {'Type': 'TERM_MATCH', 'Field': 'preInstalledSw', 'Value': 'NA'}
         ]
     )
@@ -106,6 +110,25 @@ Los precios se obtienen directamente de la **AWS Price List API oficial**, que p
 **Fallback:** El script mantiene precios predefinidos de us-east-1 como fallback si no hay conectividad con AWS.
 
 **Nota importante:** Los precios pueden variar por región y tipo de compra (Reserved Instances, Savings Plans, Spot). El script usa precios On-Demand como baseline conservador.
+
+### 2.1.1 Integración con AWS Cost Explorer (Opcional)
+
+El script soporta la variable de entorno `EKS_MONTHLY_COST` para usar costos reales:
+
+```python
+monthly_cost_real = float(os.environ.get('EKS_MONTHLY_COST', 0))
+
+if monthly_cost_real > 0:
+    ec2_monthly_cost = monthly_cost_real
+    current_monthly_cost = control_plane_monthly + ec2_monthly_cost
+    print(f"✅ Usando costo real de Cost Explorer: ${monthly_cost_real:.2f}/mes")
+```
+
+**Justificación:**
+Si tienes acceso a AWS Cost Explorer, puedes obtener el costo real de los últimos 30 días y pasarlo como variable de entorno. Esto proporciona una estimación más precisa que el cálculo basado en precios On-Demand, especialmente si usas Reserved Instances o Savings Plans.
+
+**Fuente oficial:**
+- [AWS Cost Explorer - AWS](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/)
 
 ### 2.2 Soporte Multi-Región
 
@@ -294,8 +317,11 @@ El README documenta honestamente las limitaciones:
 **Mejoras implementadas:**
 - ✅ **Precios en tiempo real:** Ahora usa AWS Pricing API en lugar de precios hardcodeados
 - ✅ **Soporte multi-región:** Soporta múltiples regiones de AWS
-- ✅ **Fee del 12% incluido:** El cálculo de Auto Mode incluye el sobrecosto oficial
+- ✅ **Fee del 12% incluido:** El cálculo de Auto Mode incluye el sobrecargo oficial
 - ✅ **Métricas reales opcionales:** Puede usar CloudWatch Container Insights si está disponible
+- ✅ **Integración con Cost Explorer:** Soporta costos reales vía variable `EKS_MONTHLY_COST`
+- ✅ **Referencias de pricing:** Incluye enlaces a documentación oficial al final del reporte
+- ✅ **Timeout configurable:** El script unificado tiene timeout de 30s para clusters grandes
 
 Estas limitaciones están documentadas en el README para transparencia.
 

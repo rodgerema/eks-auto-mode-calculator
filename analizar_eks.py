@@ -27,15 +27,22 @@ def get_cluster_info():
 
 def run_kubectl_collector(cluster_name, region):
     """Ejecuta el recolector basado en kubectl"""
-    print("\n⏳ Recolectando datos con kubectl...\n")
+    print("\n⏳ Recolectando datos con kubectl...")
     try:
         result = subprocess.run(
             ["python3", "recolector_eks.py"],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
+            timeout=30
         )
+        # Mostrar mensajes de progreso de stderr
+        if result.stderr:
+            print(result.stderr, end='')
         return result.stdout
+    except subprocess.TimeoutExpired:
+        print("❌ Timeout: El recolector tardó más de 30 segundos")
+        return None
     except subprocess.CalledProcessError as e:
         print(f"❌ Error ejecutando recolector kubectl: {e.stderr}")
         return None
