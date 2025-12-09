@@ -2,11 +2,50 @@
 
 Este documento justifica cada cálculo realizado en la calculadora con referencias a documentación oficial de AWS y Kubernetes.
 
+**Última actualización:** Diciembre 2025
+
 ---
 
 ## 1. Recolección de Métricas del Cluster (recolector_eks.py)
 
-### 1.1 Utilización basada en Requests vs Capacity
+### 1.1 Métodos de Recolección
+
+El proyecto ofrece dos métodos para recolectar métricas:
+
+**Método 1: kubectl (recolector_eks.py)**
+- Acceso directo al cluster con kubectl
+- Métricas precisas de requests/capacity
+- Requiere kubeconfig configurado
+
+**Método 2: AWS APIs (recolector_eks_aws.py)**
+- Sin necesidad de kubectl
+- Usa EKS, EC2 y CloudWatch APIs
+- Ideal para análisis remoto
+
+### 1.2 CloudWatch Container Insights
+
+El script intenta obtener métricas reales de utilización desde **CloudWatch Container Insights**:
+
+```python
+cloudwatch = boto3.client('cloudwatch', region_name=region)
+response = cloudwatch.get_metric_statistics(
+    Namespace='ContainerInsights',
+    MetricName='node_cpu_utilization',
+    Dimensions=[{'Name': 'ClusterName', 'Value': cluster_name}],
+    StartTime=datetime.utcnow() - timedelta(days=7),
+    EndTime=datetime.utcnow(),
+    Period=3600,
+    Statistics=['Average']
+)
+```
+
+**Fuente oficial:**
+- [Using Container Insights - Amazon CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/ContainerInsights.html)
+- [Container Insights Metrics - Amazon EKS](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Container-Insights-metrics-EKS.html)
+
+**Fallback:** Si Container Insights no está disponible, el script usa valores por defecto conservadores (CPU: 45%, Memoria: 60%).
+
+### 1.3 Utilización basada en Requests vs Capacity
 
 **Cálculo en el código** (`recolector_eks.py:77-78`):
 ```python
@@ -33,28 +72,65 @@ El cálculo de utilización basado en `requests/capacity` representa la **utiliz
 
 ### 2.1 Precios de Instancias EC2 On-Demand
 
-**Cálculo en el código** (`calculadora_eks.py:6-13`):
+**Obtención de precios en tiempo real:**
+
+El script consulta la **AWS Price List API** para obtener precios actuales:
+
 ```python
-precios_ec2 = {
-    "t3.medium": 0.0416, "t3.large": 0.0832, "t3.xlarge": 0.1664,
-    "m5.large": 0.096,   "m5.xlarge": 0.192,  "m5.2xlarge": 0.384,
-    "c5.large": 0.085,   "c5.xlarge": 0.17,   "c5.2xlarge": 0.34,
-    "r5.large": 0.126,   "r5.xlarge": 0.252,  "r5.2xlarge": 0.504,
-    # ...
-}
+def obtener_precio_aws(instance_type, region='us-east-1'):
+    pricing_client = boto3.client('pricing', region_name='us-east-1')
+    response = pricing_client.get_products(
+        ServiceCode='AmazonEC2',
+        Filters=[
+            {'Type': 'TERM_MATCH', 'Field': 'instanceType', 'Value': instance_type},
+            {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': region_map[region]},
+            {'Type': 'TERM_MATCH', 'Field': 'operatingSystem', 'Value': 'Linux'},
+            {'Type': 'TERM_MATCH', 'Field': 'tenancy', 'Value': 'Shared'},
+            {'Type': 'TERM_MATCH', 'Field': 'preInstalledSw', 'Value': 'NA'}
+        ]
+    )
 ```
 
 **Justificación oficial:**
 
-Los precios son de instancias **On-Demand en la región us-east-1 (US East - N. Virginia)** y están documentados en:
+Los precios se obtienen directamente de la **AWS Price List API oficial**, que proporciona:
+- Precios On-Demand actualizados en tiempo real
+- Soporte para múltiples regiones de AWS
+- Precios para instancias Linux con tenancy compartida
 
 **Fuente oficial:**
+- [AWS Price List API - AWS](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/price-changes.html)
 - [EC2 On-Demand Instance Pricing - AWS](https://aws.amazon.com/ec2/pricing/on-demand/)
 - [Amazon EC2 Pricing - AWS](https://aws.amazon.com/ec2/pricing/)
 
+**Fallback:** El script mantiene precios predefinidos de us-east-1 como fallback si no hay conectividad con AWS.
+
 **Nota importante:** Los precios pueden variar por región y tipo de compra (Reserved Instances, Savings Plans, Spot). El script usa precios On-Demand como baseline conservador.
 
-### 2.2 Costo Mensual (730 horas)
+### 2.2 Soporte Multi-Región
+
+El script soporta múltiples regiones de AWS mediante un mapeo de códigos de región a nombres de ubicación:
+
+```python
+region_map = {
+    'us-east-1': 'US East (N. Virginia)',
+    'us-east-2': 'US East (Ohio)',
+    'us-west-1': 'US West (N. California)',
+    'us-west-2': 'US West (Oregon)',
+    'eu-west-1': 'EU (Ireland)',
+    'eu-central-1': 'EU (Frankfurt)',
+    'ap-southeast-1': 'Asia Pacific (Singapore)',
+    'ap-northeast-1': 'Asia Pacific (Tokyo)',
+    # ...
+}
+```
+
+**Nota importante:** La AWS Pricing API siempre se consulta desde `us-east-1` (requisito de AWS), pero los precios obtenidos corresponden a la región especificada del cluster.
+
+**Fuente oficial:**
+- [AWS Price List API - AWS](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/price-changes.html)
+
+### 2.3 Costo Mensual (730 horas)
 
 **Cálculo en el código** (`calculadora_eks.py:39-43`):
 ```python
@@ -149,18 +225,22 @@ Según la documentación oficial:
 **Fuentes oficiales:**
 - [Amazon EKS Pricing - AWS](https://aws.amazon.com/eks/pricing/)
 
-**¿Por qué el script NO incluye el sobrecosto del 12%?**
+**Cálculo del fee en el script:**
 
-El script calcula solo el **costo base de las instancias EC2** porque:
+El script **SÍ incluye el sobrecosto del 12%** en la estimación de Auto Mode:
 
-1. El sobrecosto del 12% de EKS Auto Mode se aplica tanto al costo actual como al estimado
-2. Al comparar apples-to-apples (EC2 vs EC2), el sobrecosto es un factor constante
-3. El ahorro real viene de la **reducción de nodos necesarios**, no del precio por nodo
+```python
+# Costo de instancias EC2 en Auto Mode
+auto_ec2_cost = estimated_nodes_auto * precio_hora * hours_month
 
-**Para obtener el costo total real de Auto Mode:**
+# Fee del 12% sobre las instancias EC2 (NO sobre control plane)
+auto_mode_fee = auto_ec2_cost * 0.12
+
+# Costo total Auto Mode
+auto_total_cost = control_plane_cost + auto_ec2_cost + auto_mode_fee
 ```
-Costo Total Auto Mode = (Costo EC2 estimado × 1.12) + $0.10/hora (cargo EKS cluster)
-```
+
+**Nota importante:** El fee del 12% se aplica **solo sobre el costo de las instancias EC2**, no sobre el control plane ($0.10/hora). Esto está documentado en la página oficial de pricing de EKS.
 
 ---
 
@@ -210,9 +290,14 @@ El README documenta honestamente las limitaciones:
 1. **No considera costos de transferencia de datos**
 2. **No incluye costos de EBS adicionales**
 3. **Asume patrones de uso constantes** (no considera variabilidad estacional)
-4. **Usa precios On-Demand** (no considera RIs/Savings Plans)
 
-Estas limitaciones están documentadas en `README.md:236-237` para transparencia.
+**Mejoras implementadas:**
+- ✅ **Precios en tiempo real:** Ahora usa AWS Pricing API en lugar de precios hardcodeados
+- ✅ **Soporte multi-región:** Soporta múltiples regiones de AWS
+- ✅ **Fee del 12% incluido:** El cálculo de Auto Mode incluye el sobrecosto oficial
+- ✅ **Métricas reales opcionales:** Puede usar CloudWatch Container Insights si está disponible
+
+Estas limitaciones están documentadas en el README para transparencia.
 
 ---
 

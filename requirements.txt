@@ -1,0 +1,7 @@
+# Dependencias del EKS Auto Mode Calculator
+
+# Cliente de Kubernetes para Python
+kubernetes>=29.0.0
+
+# AWS SDK para obtener precios reales desde AWS Price List API
+boto3>=1.34.0
