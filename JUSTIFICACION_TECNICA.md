@@ -240,7 +240,7 @@ Según la documentación oficial:
 > "You pay based on the duration and type of Amazon EC2 instances launched and managed by EKS Auto Mode. **The EKS Auto Mode prices are in addition to the Amazon EC2 instance price**, which covers the EC2 instances themselves."
 
 **Cargos adicionales:**
-- **Sobrecosto por nodo:** ~12% sobre el precio On-Demand del EC2
+- **Sobrecosto por nodo:** Precio específico por tipo de instancia obtenido de AWS Pricing API
   - Ejemplo: `t4g.xlarge` = $0.1344/hora (EC2) + $0.01613/hora (Auto Mode) = $0.15053/hora total
 - **Facturación:** Por segundo, con mínimo de 1 minuto
 - **Consideración de escala:** Para >150 nodos, contactar al equipo de cuenta de AWS
@@ -250,20 +250,29 @@ Según la documentación oficial:
 
 **Cálculo del fee en el script:**
 
-El script **SÍ incluye el sobrecosto del 12%** en la estimación de Auto Mode:
+El script obtiene el precio real del Auto Mode fee desde AWS Pricing API:
 
 ```python
-# Costo de instancias EC2 en Auto Mode
-auto_ec2_cost = estimated_nodes_auto * precio_hora * hours_month
+def obtener_precio_eks_automode_aws(instance_type, region):
+    response = pricing_client.get_products(
+        ServiceCode='AmazonEKS',
+        Filters=[
+            {'Type': 'TERM_MATCH', 'Field': 'location', 'Value': location},
+            {'Type': 'TERM_MATCH', 'Field': 'instanceType', 'Value': instance_type},
+            {'Type': 'TERM_MATCH', 'Field': 'operation', 'Value': 'EKSAutoUsage'},
+        ]
+    )
 
-# Fee del 12% sobre las instancias EC2 (NO sobre control plane)
-auto_mode_fee = auto_ec2_cost * 0.12
+# Cálculo con precio real de API
+automode_fee_hourly_cost = estimated_nodes_auto * precio_automode_fee_hora
+automode_fee_monthly_cost = automode_fee_hourly_cost * hours_month
 
-# Costo total Auto Mode
-auto_total_cost = control_plane_cost + auto_ec2_cost + auto_mode_fee
+# Fallback si no está disponible en API
+if precio_automode_fee_hora is None:
+    precio_automode_fee_hora = precio_ec2_hora * 0.12
 ```
 
-**Nota importante:** El fee del 12% se aplica **solo sobre el costo de las instancias EC2**, no sobre el control plane ($0.10/hora). Esto está documentado en la página oficial de pricing de EKS.
+**Nota importante:** El fee se cobra por nodo/hora y varía según el tipo de instancia. Si no se puede obtener de la API, usa 12% como fallback.
 
 ---
 
@@ -317,9 +326,10 @@ El README documenta honestamente las limitaciones:
 **Mejoras implementadas:**
 - ✅ **Precios en tiempo real:** Ahora usa AWS Pricing API en lugar de precios hardcodeados
 - ✅ **Soporte multi-región:** Soporta múltiples regiones de AWS
-- ✅ **Fee del 12% incluido:** El cálculo de Auto Mode incluye el sobrecargo oficial
+- ✅ **Fee de Auto Mode desde API:** Obtiene precios reales del fee por tipo de instancia
 - ✅ **Métricas reales opcionales:** Puede usar CloudWatch Container Insights si está disponible
 - ✅ **Integración con Cost Explorer:** Soporta costos reales vía variable `EKS_MONTHLY_COST`
+- ✅ **Consulta optimizada:** Cost Explorer termina 2 días antes para evitar datos no consolidados
 - ✅ **Referencias de pricing:** Incluye enlaces a documentación oficial al final del reporte
 - ✅ **Timeout configurable:** El script unificado tiene timeout de 30s para clusters grandes
 

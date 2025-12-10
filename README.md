@@ -4,12 +4,11 @@ Herramienta para analizar los costos de tu cluster EKS actual y estimar el ahorr
 
 ## Descripción
 
-Este proyecto consta de tres scripts de Python:
+Este proyecto consta de dos scripts de Python:
 
 1. **analizar_eks.py**: Script principal que orquesta todo el flujo (recomendado)
-2. **recolector_eks.py**: Recolecta métricas usando kubectl (requiere acceso al cluster)
-3. **recolector_eks_aws.py**: Recolecta métricas usando AWS APIs (sin kubectl)
-4. **calculadora_eks.py**: Calcula costos y estima ahorros con EKS Auto Mode
+2. **recolector_eks_aws.py**: Recolecta métricas usando AWS APIs
+3. **calculadora_eks.py**: Calcula costos y estima ahorros con EKS Auto Mode
 
 ## Diagrama de Flujo de Recolección de Datos
 
@@ -83,7 +82,20 @@ Este proyecto consta de tres scripts de Python:
                                  │
                                  ▼
         ┌────────────────────────────────────────────┐
-        │  💰 CÁLCULOS DE COSTOS                     │
+        │  5️⃣  AWS Pricing API - GetProducts         │
+        │     Service: AmazonEKS                     │
+        │     Filtros:                               │
+        │     • instanceType = <tipo detectado>      │
+        │     • location = <región>                  │
+        │     • operation = EKSAutoUsage             │
+        │                                            │
+        │     Obtiene:                               │
+        │     • Precio EKS Auto Mode fee por hora    │
+        └────────────────────────────────────────────┘
+                                 │
+                                 ▼
+        ┌────────────────────────────────────────────┐
+        │  6️⃣  CÁLCULOS DE COSTOS                     │
         │                                            │
         │  EKS Standard:                             │
         │  • Control Plane: $0.10/h × 730h           │
@@ -92,7 +104,7 @@ Este proyecto consta de tres scripts de Python:
         │  EKS Auto Mode:                            │
         │  • Control Plane: $0.10/h × 730h           │
         │  • EC2: nodos_optimizados × precio × 730h  │
-        │  • Auto Mode Fee: EC2 × 12%                │
+        │  • Auto Mode Fee: precio_real_automode/h   │
         └────────────────────────────────────────────┘
                                  │
                                  ▼
@@ -112,19 +124,23 @@ Este proyecto consta de tres scripts de Python:
 | **EKS** | `DescribeCluster` | Información del cluster | `eks:DescribeCluster` |
 | **EC2** | `DescribeInstances` | Nodos y tipos de instancia | `ec2:DescribeInstances` |
 | **CloudWatch** | `GetMetricStatistics` | Métricas de utilización | `cloudwatch:GetMetricStatistics` |
-| **Pricing** | `GetProducts` | Precios On-Demand EC2 | `pricing:GetProducts` |
+| **Cost Explorer** | `GetCostAndUsage` | Costo real (incluye Savings/RI) | `ce:GetCostAndUsage` |
+| **Pricing** | `GetProducts` | Precios On-Demand EC2 y EKS Auto Mode | `pricing:GetProducts` |
 
-**Nota**: El Pricing API siempre se consulta en `us-east-1` independientemente de la región del cluster.
+**Notas importantes**:
+- El Pricing API siempre se consulta en `us-east-1` independientemente de la región del cluster
+- Cost Explorer consulta los últimos 30 días terminando 2 días antes de hoy para evitar datos no consolidados
 
 ## Cómo se Calculan los Costos
 
 ### Obtención de Precios en Tiempo Real
 
 El script obtiene automáticamente los precios actuales desde la **AWS Price List API oficial**:
-- Precios On-Demand para instancias EC2
+- **Precios On-Demand para instancias EC2**: Precio base de las instancias
+- **Precios EKS Auto Mode Fee**: Precio real del fee de Auto Mode por instancia/hora
 - Actualizados en tiempo real desde AWS
 - Soporta múltiples regiones (us-east-1, us-west-2, eu-west-1, etc.)
-- Fallback a precios locales si no hay conectividad
+- Fallback a 12% sobre EC2 si no hay conectividad para Auto Mode fee
 
 ### Costo Actual (EKS Standard con Managed Node Groups)
 
@@ -137,7 +153,7 @@ Instancias EC2 = Número de Nodos × Precio por Hora × 730 horas/mes
 
 ### Costo Estimado con EKS Auto Mode
 
-EKS Auto Mode mejora la eficiencia mediante **Bin Packing automático** y cobra un **fee del 12%** sobre las instancias EC2.
+EKS Auto Mode mejora la eficiencia mediante **Bin Packing automático** y cobra un **fee específico** por instancia/hora.
 
 #### Metodología de Cálculo:
 
@@ -164,12 +180,12 @@ EKS Auto Mode mejora la eficiencia mediante **Bin Packing automático** y cobra 
    ```
    Control Plane = $0.10/hora × 730 horas = $73/mes
    Instancias EC2 = Nodos Equivalentes × Precio por Hora × 730 horas/mes
-   Auto Mode Fee = Costo EC2 × 12%
+   Auto Mode Fee = Nodos Equivalentes × Precio Auto Mode Fee × 730 horas/mes
 
    Total = Control Plane + Instancias EC2 + Auto Mode Fee
    ```
 
-**Nota importante**: El fee del 12% de EKS Auto Mode se aplica sobre el costo de las instancias EC2, no sobre el control plane.
+**Nota importante**: El fee de EKS Auto Mode se obtiene directamente de la AWS Pricing API, con fallback al 12% sobre EC2 si no está disponible.
 
 ### Ahorros Operativos
 
@@ -200,10 +216,9 @@ Verifica tu versión de Python:
 python3 --version
 ```
 
-### 2. Dependencias de Python
+### 4. Dependencias de Python
 
 El script necesita las siguientes librerías:
-- `kubernetes`: Cliente de Kubernetes para Python (solo si usas kubectl)
 - `boto3`: AWS SDK para obtener precios y métricas
 
 ```bash
@@ -233,17 +248,9 @@ export AWS_SECRET_ACCESS_KEY="tu-secret-key"
 export AWS_REGION="us-east-1"  # Opcional, por defecto usa us-east-1
 ```
 
-### 4. kubectl Configurado (Opcional)
+### 3. kubectl Configurado (No requerido)
 
-Si eliges el método con kubectl (más preciso), asegúrate de tener acceso a tu cluster EKS:
-
-```bash
-# Configurar kubeconfig
-aws eks update-kubeconfig --region <tu-region> --name <nombre-cluster>
-
-# Verificar acceso
-kubectl get nodes
-```
+El script usa únicamente AWS APIs para obtener toda la información necesaria. No requiere acceso directo al cluster con kubectl.
 
 ### 5. Permisos AWS Requeridos
 
@@ -251,11 +258,8 @@ Tu usuario/rol de AWS necesita permisos para:
 - `eks:DescribeCluster` (obtener información del cluster)
 - `ec2:DescribeInstances` (listar nodos EC2)
 - `cloudwatch:GetMetricStatistics` (métricas de utilización - opcional)
+- `ce:GetCostAndUsage` (costo real con Savings Plans/RI - recomendado)
 - `pricing:GetProducts` (para obtener precios de EC2 en tiempo real)
-
-**Con kubectl** también necesitas permisos de lectura en Kubernetes:
-- `nodes` (list)
-- `pods` (list en todos los namespaces)
 
 **Nota**: Si no tienes acceso a CloudWatch Container Insights, el script usará valores por defecto de utilización.
 
@@ -278,7 +282,7 @@ aws configure
 
 ## Uso
 
-### Opción 1: Script Unificado (Recomendado)
+### Script Unificado (Recomendado)
 
 El script `analizar_eks.py` ejecuta todo el flujo automáticamente:
 
@@ -289,7 +293,6 @@ python3 analizar_eks.py
 El script te preguntará:
 1. Nombre del cluster EKS
 2. Región AWS (default: us-east-1)
-3. Si tienes acceso con kubectl o solo AWS APIs
 
 **Ejemplo de ejecución:**
 ```
@@ -297,12 +300,6 @@ El script te preguntará:
 
 Nombre del cluster EKS: mi-cluster-prod
 Región AWS (default: us-east-1): us-east-1
-
-¿Tienes acceso directo al cluster con kubectl?
-  1) Sí - Usar kubectl (más preciso)
-  2) No - Usar AWS APIs solamente
-
-Selecciona opción [1/2]: 2
 
 ⏳ Recolectando datos con AWS APIs...
 ✅ Cluster encontrado: mi-cluster-prod (versión 1.28)
@@ -313,19 +310,7 @@ Selecciona opción [1/2]: 2
 ...
 ```
 
-### Opción 2: Ejecución Manual (Paso a Paso)
-
-#### Con kubectl (más preciso)
-
-```bash
-# Paso 1: Recolectar datos
-eval $(python3 recolector_eks.py)
-
-# Paso 2: Calcular costos
-python3 calculadora_eks.py
-```
-
-#### Sin kubectl (solo AWS APIs)
+### Ejecución Manual (Paso a Paso)
 
 ```bash
 # Paso 1: Recolectar datos
@@ -359,12 +344,6 @@ cat eks_vars.sh
 
 Nombre del cluster EKS: mi-cluster-prod
 Región AWS (default: us-east-1): us-east-1
-
-¿Tienes acceso directo al cluster con kubectl?
-  1) Sí - Usar kubectl (más preciso)
-  2) No - Usar AWS APIs solamente
-
-Selecciona opción [1/2]: 2
 
 ⏳ Recolectando datos con AWS APIs...
 ✅ Cluster encontrado: mi-cluster-prod (versión 1.28)
@@ -400,7 +379,7 @@ Selecciona opción [1/2]: 2
 🟢 EKS AUTO MODE (Estimado)
   Control Plane:         $     73.00  (@$0.10/hora)
   Instancias EC2:        $    952.09  (6.8 nodos)
-  Auto Mode Fee (12%):   $    114.25  (sobre EC2)
+  Auto Mode Fee:         $    114.25  (@$0.0168/h por nodo)
   ----------------------------------------------------------
   TOTAL MENSUAL:         $  1,139.34
 
@@ -416,7 +395,7 @@ Selecciona opción [1/2]: 2
 
 ℹ️  NOTAS:
   • Precios obtenidos de AWS Price List API oficial
-  • EKS Auto Mode incluye fee del 12% sobre costos de EC2
+  • EKS Auto Mode fee obtenido directamente de AWS API
   • Estimación asume mejora del 20% en bin packing
   • Ahorro operativo: 10h/mes × $50/h
 
@@ -446,6 +425,7 @@ El recolector genera las siguientes variables:
 | `EKS_UTIL_MEM` | % Utilización RAM (requests/capacity) | `62.15` |
 | `AWS_REGION` | Región del cluster | `us-east-1` |
 | `EKS_MONTHLY_COST` | Costo real de Cost Explorer (opcional) | `1200.50` |
+| `EKS_MONTHLY_COST` | Costo real de Cost Explorer (opcional) | `1200.50` |
 
 ## Notas Importantes
 
@@ -454,9 +434,12 @@ El recolector genera las siguientes variables:
 - **Precios en Tiempo Real**: El script obtiene automáticamente los precios actuales desde la AWS Price List API
 - **Multi-Región**: Soporta múltiples regiones de AWS (usa la variable `AWS_REGION`)
 - **Precios On-Demand**: Se consultan precios On-Demand de instancias Linux
-- **Reserved Instances**: Si usas Reserved Instances o Savings Plans, los ahorros reales serán diferentes
+- **Costo Real con Cost Explorer**: Si tienes permisos `ce:GetCostAndUsage`, el script obtiene el costo real de los últimos 30 días
+- **Savings Plans / Reserved Instances**: El costo real de Cost Explorer incluye automáticamente estos descuentos
 - **Fallback**: Si no hay conectividad con AWS, usa precios predefinidos de us-east-1
-- **EKS Auto Mode Fee**: Se aplica un 12% adicional sobre las instancias EC2 (no sobre control plane)
+- **EKS Auto Mode Fee**: Se obtiene directamente de la AWS Pricing API, con fallback al 12% sobre EC2 si no está disponible
+- **Importante**: Los descuentos de Savings Plans/RI se mantendrían al migrar a Auto Mode
+- **Cost Explorer**: Consulta los últimos 30 días terminando 2 días antes de hoy para evitar datos no consolidados
 
 ### Sobre las Estimaciones
 
@@ -506,13 +489,7 @@ python3 calculadora_eks.py
 
 ### Error: "Error cargando configuración de K8s"
 
-Si elegiste el método con kubectl, verifica tu acceso:
-```bash
-aws eks update-kubeconfig --region <region> --name <cluster-name>
-kubectl get nodes  # Verificar acceso
-```
-
-Si no tienes acceso con kubectl, ejecuta nuevamente y selecciona la opción 2 (AWS APIs).
+Este error ya no aplica ya que el script no usa kubectl. Si ves este error, verifica que estés usando la versión actualizada del script.
 
 ### Error: "Error leyendo variables de entorno"
 
