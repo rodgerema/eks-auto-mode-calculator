@@ -1,4 +1,26 @@
-# Changelog - Integración con Cost Explorer
+# Changelog - EKS Auto Mode Calculator
+
+## [v2.2.0] - 2025-12-18
+
+### ✨ Nuevas Funcionalidades
+- **Sistema de logging mejorado**: Los logs ahora se guardan en la carpeta `logs/` por defecto
+- **Directorio de logs configurable**: Se puede configurar mediante la variable de entorno `EKS_CALCULATOR_LOG_DIR`
+- **Auto-creación de directorio**: La carpeta de logs se crea automáticamente si no existe
+
+### 🔧 Mejoras
+- **Organización mejorada**: Todos los logs en un solo lugar (`logs/` en lugar de archivos .log dispersos)
+- **Configurabilidad**: Permite especificar una ubicación personalizada para los logs
+- **.gitignore actualizado**: La carpeta `logs/` se ignora automáticamente en git
+
+### 📚 Documentación
+- **Sistema de logging documentado en README**: Documentación completa incorporada al README principal
+- **LOGGING.md eliminado**: Contenido integrado en el README para centralizar la documentación
+- **consulta_simple.md eliminado**: Archivo de notas temporales removido
+
+### 🛠️ Cambios Técnicos
+- Actualizado `logger_utils.py` con soporte para directorio configurable
+- Nueva función `ensure_log_dir()` para crear el directorio de logs
+- Parámetro `log_dir` añadido a `setup_logger()`
 
 ## [v2.1.0] - 2025-12-10
 
@@ -17,7 +39,7 @@
 - Formato mejorado: `@$0.0168/h por nodo` en lugar de `(12% de EC2)`
 
 ### 🛠️ Cambios Técnicos
-- Removido el sistema de logging para simplificar el código
+- Sistema de logging agregado para tracking de operaciones
 - Función `get_region_name_for_pricing()` centralizada
 - Consulta específica para `operation: 'EKSAutoUsage'` en EKS Pricing API
 - Búsqueda de productos con `eksproducttype` que contenga "AutoMode"

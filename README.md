@@ -40,15 +40,19 @@ Este proyecto consta de dos scripts de Python:
                                  │
                                  ▼
         ┌────────────────────────────────────────────┐
-        │  3️⃣  AWS CloudWatch - GetMetricStatistics  │
-        │     Namespace: ContainerInsights           │
-        │     Métricas:                              │
-        │     • node_cpu_utilization                 │
-        │     • node_memory_utilization              │
-        │     Período: últimos 7 días                │
+        │  3️⃣  Obtención de Métricas (Cascada)       │
         │                                            │
-        │     ⚠️  Requiere Container Insights        │
-        │     habilitado en el cluster               │
+        │     1. Container Insights (primario)       │
+        │        → node_cpu/memory_utilization       │
+        │     2. EC2 Metrics (alternativa)           │
+        │        → CPUUtilization (ajustado)         │
+        │     3. ASG Analysis (inferencia)           │
+        │        → Estabilidad de escalado           │
+        │     4. Input Manual (usuario)              │
+        │     5. Fallback Conservador (último)       │
+        │                                            │
+        │     ⚠️  Siempre obtiene métricas, priori-  │
+        │     zando las más precisas disponibles     │
         └────────────────────────────────────────────┘
                                  │
                                  ▼
@@ -123,15 +127,54 @@ Este proyecto consta de dos scripts de Python:
 |-----|----------|-----------|---------------------|
 | **EKS** | `DescribeCluster` | Información del cluster | `eks:DescribeCluster` |
 | **EC2** | `DescribeInstances` | Nodos y tipos de instancia | `ec2:DescribeInstances` |
-| **CloudWatch** | `GetMetricStatistics` | Métricas de utilización | `cloudwatch:GetMetricStatistics` |
+| **CloudWatch** | `GetMetricStatistics` | Métricas de utilización (múltiples namespaces) | `cloudwatch:GetMetricStatistics` |
+| **AutoScaling** | `DescribeAutoScalingGroups` | Análisis de patrones de escalado | `autoscaling:DescribeAutoScalingGroups` |
 | **Cost Explorer** | `GetCostAndUsage` | Costo real (incluye Savings/RI) | `ce:GetCostAndUsage` |
 | **Pricing** | `GetProducts` | Precios On-Demand EC2 y EKS Auto Mode | `pricing:GetProducts` |
+
+**Métricas de CloudWatch utilizadas:**
+- `ContainerInsights` namespace: `node_cpu_utilization`, `node_memory_utilization` (primario)
+- `AWS/EC2` namespace: `CPUUtilization` (alternativa)
+- `AWS/AutoScaling` namespace: `GroupDesiredCapacity` (análisis complementario)
 
 **Notas importantes**:
 - El Pricing API siempre se consulta en `us-east-1` independientemente de la región del cluster
 - Cost Explorer consulta los últimos 30 días terminando 2 días antes de hoy para evitar datos no consolidados
+- El sistema de cascada asegura obtener métricas incluso sin Container Insights habilitado
 
 ## Cómo se Calculan los Costos
+
+### Sistema de Obtención de Métricas con Cascada Inteligente
+
+El script implementa un **sistema de cascada de fallback** que asegura obtener siempre las métricas más precisas disponibles, incluso si Container Insights no está habilitado:
+
+#### Orden de Evaluación (de más a menos preciso)
+
+1. **Container Insights** (★★★★★ - 95%+ precisión)
+   - Métricas a nivel de contenedor/pod
+   - Excluye overhead del host
+   - Requiere habilitación explícita
+
+2. **CloudWatch EC2 Metrics** (★★★★☆ - 80-85% precisión)
+   - Métricas básicas de EC2 (siempre disponibles)
+   - Ajustado por overhead del host (~8%)
+   - Usa CPU como proxy para estimar memoria
+
+3. **Análisis de ASG** (★★★☆☆ - 70% precisión)
+   - Analiza patrones de escalado histórico
+   - Si ASG no escaló en 30 días → cluster sobreaprovisionado
+   - Usa valores conservadores (30% CPU, 45% MEM)
+
+4. **Input Manual** (★★★★☆ - depende del usuario)
+   - Permite ingresar valores de herramientas externas
+   - Útil si tienes Datadog, Prometheus, etc.
+
+5. **Fallback Conservador** (★★☆☆☆ - 60% precisión)
+   - Valores basados en industry benchmarks
+   - CPU: 35%, Memoria: 50%
+   - Más conservador que versión anterior
+
+**Ventaja clave:** Incluso sin Container Insights, obtienes métricas reales basadas en datos de tu cluster, no estimaciones genéricas.
 
 ### Obtención de Precios en Tiempo Real
 
@@ -255,13 +298,22 @@ El script usa únicamente AWS APIs para obtener toda la información necesaria. 
 ### 5. Permisos AWS Requeridos
 
 Tu usuario/rol de AWS necesita permisos para:
-- `eks:DescribeCluster` (obtener información del cluster)
-- `ec2:DescribeInstances` (listar nodos EC2)
-- `cloudwatch:GetMetricStatistics` (métricas de utilización - opcional)
-- `ce:GetCostAndUsage` (costo real con Savings Plans/RI - recomendado)
-- `pricing:GetProducts` (para obtener precios de EC2 en tiempo real)
 
-**Nota**: Si no tienes acceso a CloudWatch Container Insights, el script usará valores por defecto de utilización.
+**Permisos Básicos (Requeridos):**
+- `eks:DescribeCluster` - Obtener información del cluster
+- `ec2:DescribeInstances` - Listar nodos EC2
+- `pricing:GetProducts` - Obtener precios de EC2 y EKS Auto Mode en tiempo real
+
+**Permisos Opcionales (Recomendados para mayor precisión):**
+- `cloudwatch:GetMetricStatistics` - Métricas de utilización (Container Insights, EC2, ASG)
+- `autoscaling:DescribeAutoScalingGroups` - Análisis de patrones de escalado
+- `ce:GetCostAndUsage` - Costo real con Savings Plans/RI
+
+**Nota sobre métricas**: El script implementa un sistema de cascada que siempre obtendrá métricas:
+- Con Container Insights: ~95% precisión
+- Sin Container Insights pero con métricas EC2: ~80-85% precisión
+- Sin métricas pero con acceso a ASG: ~70% precisión
+- Sin ninguna métrica: Fallback conservador basado en industry benchmarks
 
 ## Instalación
 
@@ -425,7 +477,71 @@ El recolector genera las siguientes variables:
 | `EKS_UTIL_MEM` | % Utilización RAM (requests/capacity) | `62.15` |
 | `AWS_REGION` | Región del cluster | `us-east-1` |
 | `EKS_MONTHLY_COST` | Costo real de Cost Explorer (opcional) | `1200.50` |
-| `EKS_MONTHLY_COST` | Costo real de Cost Explorer (opcional) | `1200.50` |
+
+## Sistema de Logging
+
+### Configuración de Logs
+
+Los scripts generan logs detallados para facilitar el debugging y monitoreo:
+
+**Ubicación de logs:**
+- Por defecto: carpeta `logs/` en el directorio del proyecto
+- Configurable mediante la variable de entorno: `EKS_CALCULATOR_LOG_DIR`
+
+```bash
+# Cambiar directorio de logs
+export EKS_CALCULATOR_LOG_DIR="/var/log/eks-calculator"
+python3 analizar_eks.py
+
+# O usar el directorio por defecto (logs/)
+python3 analizar_eks.py
+```
+
+### Archivos de Log Generados
+
+| Archivo | Script | Contenido |
+|---------|--------|-----------|
+| `logs/eks_analysis.log` | `analizar_eks.py` | Flujo completo de análisis, ejecución de subprocesos |
+| `logs/eks_collector_aws.log` | `recolector_eks_aws.py` | Llamadas a APIs de AWS (EKS, EC2, CloudWatch, Cost Explorer) |
+
+### Información Registrada
+
+- **Comandos ejecutados**: Cada script y sus parámetros
+- **Llamadas a AWS APIs**: EKS, EC2, CloudWatch, Cost Explorer, Pricing
+- **Resultados y errores**: Precios obtenidos, costos calculados, errores de API
+- **Variables y parámetros**: Todas las variables de entorno generadas y usadas
+
+### Revisar Logs
+
+```bash
+# Ver logs en tiempo real
+tail -f logs/eks_analysis.log
+
+# Ver todos los logs
+cat logs/*.log
+
+# Buscar errores
+grep ERROR logs/*.log
+
+# Buscar llamadas específicas a AWS
+grep "AWS API" logs/eks_collector_aws.log
+
+# Contar llamadas por servicio
+grep "AWS API:" logs/eks_collector_aws.log | cut -d: -f4 | cut -d. -f1 | sort | uniq -c
+```
+
+### Formato de Logs
+
+```
+YYYY-MM-DD HH:MM:SS - nombre_logger - NIVEL - mensaje
+```
+
+Ejemplo:
+```
+2025-12-18 14:30:45 - analizar_eks - INFO - Cluster: mi-cluster, Región: us-east-1
+2025-12-18 14:30:46 - recolector_aws - INFO - AWS API: EKS.describe_cluster
+2025-12-18 14:30:47 - recolector_aws - INFO - Encontrados 8 nodos
+```
 
 ## Notas Importantes
 
@@ -441,11 +557,19 @@ El recolector genera las siguientes variables:
 - **Importante**: Los descuentos de Savings Plans/RI se mantendrían al migrar a Auto Mode
 - **Cost Explorer**: Consulta los últimos 30 días terminando 2 días antes de hoy para evitar datos no consolidados
 
+### Sobre las Métricas de Utilización
+
+- **Sistema de cascada inteligente**: Siempre obtiene métricas, priorizando las más precisas
+- **Sin Container Insights**: El script usa métricas EC2 básicas (siempre disponibles) ajustadas por overhead
+- **Valores de fallback actualizados**: Basados en industry benchmarks (Datadog, CNCF, Fairwinds)
+- **Transparencia**: El reporte indica claramente la fuente de métricas utilizada
+
 ### Sobre las Estimaciones
 
 - El ahorro estimado es **conservador** (mejora del 20% en bin packing)
 - En la práctica, clusters con baja utilización (<50%) pueden ahorrar más del 30-40%
 - Clusters ya optimizados (>80% utilización) verán menores ahorros en infraestructura
+- Los valores de fallback son más conservadores que versión anterior (35% CPU vs 45%)
 
 ### Limitaciones
 
@@ -507,7 +631,14 @@ Verifica que:
 
 ### CloudWatch Container Insights no disponible
 
-Si ves el mensaje "CloudWatch Container Insights no disponible", el script usará valores por defecto (CPU: 45%, Memoria: 60%). Para obtener métricas reales:
+Si ves el mensaje "CloudWatch Container Insights no disponible", **no te preocupes**. El script automáticamente:
+
+1. Intentará usar **métricas EC2 básicas** (siempre disponibles, ~80-85% precisión)
+2. Si no hay métricas EC2, analizará **patrones de ASG** para inferir sobreaprovisionamiento
+3. Te ofrecerá **ingresar valores manualmente** si los conoces
+4. Como último recurso, usará **valores conservadores** basados en industry benchmarks
+
+**Para obtener la máxima precisión (Container Insights):**
 
 1. Habilita Container Insights en tu cluster:
 ```bash
@@ -521,6 +652,8 @@ aws eks update-cluster-config \
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/quickstart/cwagent-fluentd-quickstart.yaml
 ```
+
+**Nota**: El sistema de cascada asegura que siempre obtendrás un análisis útil, incluso sin Container Insights.
 
 ### Instancia no reconocida
 

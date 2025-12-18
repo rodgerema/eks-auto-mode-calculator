@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import math
 
 try:
     import boto3
@@ -131,6 +132,7 @@ def calcular_ahorro():
         utilizacion_mem = float(os.environ.get('EKS_UTIL_MEM', 50)) / 100
         region = os.environ.get('AWS_REGION', 'us-east-1')
         monthly_cost_real = float(os.environ.get('EKS_MONTHLY_COST', 0))
+        metric_source = os.environ.get('EKS_METRIC_SOURCE', 'No especificada')
     except ValueError as e:
         print(f"❌ Error leyendo variables de entorno: {e}")
         print("Ejecuta primero el script recolector.")
@@ -188,7 +190,11 @@ def calcular_ahorro():
     waste_factor = 1 - ((utilizacion_cpu + utilizacion_mem) / 2)
     efficiency_gain = 0.20
     potential_reduction = waste_factor * efficiency_gain
-    estimated_nodes_auto = node_count * (1 - potential_reduction)
+
+    # IMPORTANTE: Redondear hacia arriba porque no puedes pagar por instancias fraccionarias
+    # Si el bin packing óptimo requiere 2.7 instancias, pagarás por 3 instancias completas
+    estimated_nodes_auto_decimal = node_count * (1 - potential_reduction)
+    estimated_nodes_auto = math.ceil(estimated_nodes_auto_decimal)
 
     # Calcular factor de descuento si tenemos costo real
     discount_factor = 1.0
@@ -240,10 +246,14 @@ def calcular_ahorro():
     print(f"  Control Plane:         ${control_plane_monthly:>10,.2f}  (@$0.10/hora)")
     if discount_factor < 1.0:
         ec2_auto_ondemand = estimated_nodes_auto * precio_ec2_hora * hours_month
-        print(f"  Instancias EC2:        ${ec2_auto_monthly_cost:>10,.2f}  ({estimated_nodes_auto:.1f} nodos @ ${precio_ec2_hora:.4f}/h con descuento)")
+        print(f"  Instancias EC2:        ${ec2_auto_monthly_cost:>10,.2f}  ({estimated_nodes_auto} nodos @ ${precio_ec2_hora:.4f}/h con descuento)")
         print(f"    (On-Demand sería:    ${ec2_auto_ondemand:>10,.2f})")
+        if estimated_nodes_auto_decimal != estimated_nodes_auto:
+            print(f"    (Capacidad estimada: {estimated_nodes_auto_decimal:.1f} nodos, redondeado a {estimated_nodes_auto})")
     else:
-        print(f"  Instancias EC2:        ${ec2_auto_monthly_cost:>10,.2f}  ({estimated_nodes_auto:.1f} nodos @ ${precio_ec2_hora:.4f}/h)")
+        print(f"  Instancias EC2:        ${ec2_auto_monthly_cost:>10,.2f}  ({estimated_nodes_auto} nodos @ ${precio_ec2_hora:.4f}/h)")
+        if estimated_nodes_auto_decimal != estimated_nodes_auto:
+            print(f"    (Capacidad estimada: {estimated_nodes_auto_decimal:.1f} nodos, redondeado a {estimated_nodes_auto})")
     print(f"  Auto Mode Fee:         ${automode_fee_monthly_cost:>10,.2f}  (@${precio_automode_fee_hora:.4f}/h por nodo)")
     print(f"  {'-'*58}")
     print(f"  TOTAL MENSUAL:         ${auto_monthly_cost:>10,.2f}")
@@ -270,6 +280,7 @@ def calcular_ahorro():
 
     print(f"ℹ️  NOTAS:")
     print(f"  • Precios obtenidos de AWS Price List API oficial")
+    print(f"  • Fuente de métricas de utilización: {metric_source}")
     if monthly_cost_real > 0:
         print(f"  • Costo actual basado en Cost Explorer (últimos 30 días)")
         if discount_factor < 1.0:
@@ -279,6 +290,7 @@ def calcular_ahorro():
     else:
         print(f"  • Precio Auto Mode fee obtenido directamente de AWS API")
     print(f"  • Estimación asume mejora del 20% en bin packing")
+    print(f"  • Número de nodos redondeado hacia arriba (no se pagan instancias fraccionarias)")
     print(f"  • Ahorro operativo: {horas_ing_ahorradas}h/mes × ${costo_hora_ing}/h")
     print()
     

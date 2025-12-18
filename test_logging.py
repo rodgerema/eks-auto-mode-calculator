@@ -25,11 +25,13 @@ def test_logging():
     
     logger.info("Prueba de logging completada")
     print("✅ Logging configurado correctamente")
-    print("📄 Revisa los archivos de log generados:")
-    print("   - test.log")
-    print("   - eks_analysis.log (cuando ejecutes analizar_eks.py)")
-    print("   - eks_collector_aws.log (cuando ejecutes recolector_eks_aws.py)")
-    print("   - eks_calculator.log (cuando ejecutes calculadora_eks.py)")
+    print("📄 Revisa los archivos de log en la carpeta logs/:")
+    print("   - logs/test.log")
+    print("   - logs/eks_analysis.log (cuando ejecutes analizar_eks.py)")
+    print("   - logs/eks_collector_aws.log (cuando ejecutes recolector_eks_aws.py)")
+    print("\n💡 Tip: Puedes configurar un directorio personalizado:")
+    print("   export EKS_CALCULATOR_LOG_DIR='/var/log/eks-calculator'")
+    print("   python3 test_logging.py")
 
 if __name__ == "__main__":
     test_logging()
