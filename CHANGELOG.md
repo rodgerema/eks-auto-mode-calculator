@@ -1,5 +1,34 @@
 # Changelog - EKS Auto Mode Calculator
 
+## [v2.3.0] - 2025-12-19
+
+### ✨ Nuevas Funcionalidades
+- **Variables de entorno extendidas**: Ahora se exportan variables adicionales para mayor transparencia
+  - `EKS_MONTHLY_COST_ONDEMAND`: Costo On-Demand equivalente sin descuentos
+  - `EKS_SAVINGS_PERCENTAGE`: Porcentaje de ahorro detectado (RI/Savings Plans)
+  - `EKS_METRIC_SOURCE`: Indica la fuente de métricas utilizada
+  - `EKS_COST_SOURCE`: Indica la fuente del costo (Cost Explorer o Fallback)
+- **Análisis de ahorros mejorado**: Cálculo detallado de ahorros con Savings Plans y Reserved Instances
+  - Desglose completo por tipo de compra (On-Demand, RI, Savings Plans, Spot)
+  - Cálculo de costo On-Demand equivalente cuando hay descuentos aplicados
+
+### 🔧 Mejoras
+- **Mayor transparencia en reportes**: Los logs ahora muestran claramente:
+  - Costo real vs costo On-Demand equivalente
+  - Desglose detallado por servicio y tipo de compra
+  - Porcentaje de ahorros por RI y Savings Plans
+- **Verificación de Control Plane**: Detecta y advierte si el Control Plane no aparece en los costos
+- **Logs más detallados**: Información completa sobre descuentos aplicados y fuentes de datos
+
+### 📚 Documentación
+- **README actualizado**: Tabla de variables de entorno completa con todas las nuevas variables
+- **CHANGELOG actualizado**: Registro completo de cambios con fechas correctas
+
+### 🛠️ Cambios Técnicos
+- Función `calculate_ondemand_equivalent()` para estimar costos sin descuentos
+- Mejoras en `get_real_cost_from_cost_explorer()` con logging detallado por tipo de compra
+- Exportación de 5 variables adicionales para análisis completo
+
 ## [v2.2.0] - 2025-12-18
 
 ### ✨ Nuevas Funcionalidades

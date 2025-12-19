@@ -476,7 +476,11 @@ El recolector genera las siguientes variables:
 | `EKS_UTIL_CPU` | % Utilización CPU (requests/capacity) | `45.30` |
 | `EKS_UTIL_MEM` | % Utilización RAM (requests/capacity) | `62.15` |
 | `AWS_REGION` | Región del cluster | `us-east-1` |
-| `EKS_MONTHLY_COST` | Costo real de Cost Explorer (opcional) | `1200.50` |
+| `EKS_MONTHLY_COST` | Costo real mensual (incluye descuentos) | `1200.50` |
+| `EKS_MONTHLY_COST_ONDEMAND` | Costo On-Demand equivalente | `1500.00` |
+| `EKS_SAVINGS_PERCENTAGE` | Porcentaje de ahorro actual | `20.0` |
+| `EKS_METRIC_SOURCE` | Fuente de las métricas | `Container Insights` |
+| `EKS_COST_SOURCE` | Fuente del costo | `Cost Explorer` |
 
 ## Sistema de Logging
 

@@ -282,18 +282,165 @@ def get_manual_utilization():
     logger.info("Usuario optó por no ingresar valores manuales")
     return None, None
 
-def get_real_cost_from_cost_explorer(cluster_name, region, instance_ids, days=30):
-    """Obtiene el costo real de EC2 del cluster desde Cost Explorer usando aws:eks:cluster-name"""
-    logger.info(f"Consultando Cost Explorer para cluster: {cluster_name} (últimos {days} días)")
-    ce = boto3.client('ce', region_name='us-east-1')  # Cost Explorer siempre en us-east-1
+def calculate_ondemand_equivalent(cost_by_purchase, total_amortized):
+    """
+    Calcula el costo On-Demand equivalente cuando hay RIs/SPs
+    Asume que RIs dan ~30% descuento y SPs ~10-20%
+    """
+    # Estimación conservadora de descuentos
+    RI_DISCOUNT = 0.30  # 30% descuento típico
+    SP_DISCOUNT = 0.15  # 15% descuento típico
+
+    ondemand_from_ri = cost_by_purchase['reserved'] / (1 - RI_DISCOUNT) if cost_by_purchase['reserved'] > 0 else 0
+    ondemand_from_sp = cost_by_purchase['savings_plans'] / (1 - SP_DISCOUNT) if cost_by_purchase['savings_plans'] > 0 else 0
+    ondemand_direct = cost_by_purchase['on_demand']
+
+    return ondemand_from_ri + ondemand_from_sp + ondemand_direct + cost_by_purchase['spot']
+
+def calculate_fallback_cost(cluster_name, instances, region, days):
+    """
+    Cálculo de fallback cuando no hay tag
+    Usa: nodos detectados + control plane fijo
+    """
+    logger.warning(f"")
+    logger.warning(f"{'='*60}")
+    logger.warning(f"⚠️  MODO FALLBACK - Tag 'aws:eks:cluster-name' no encontrado")
+    logger.warning(f"{'='*60}")
+    logger.warning(f"")
+
+    # Control Plane fijo
+    CONTROL_PLANE_MONTHLY = 0.10 * 24 * 30  # $72/mes
+
+    logger.info(f"✅ Control Plane EKS: ${CONTROL_PLANE_MONTHLY:.2f}/mes (calculado)")
+    logger.warning(f"⚠️  Data Plane: No se puede calcular sin acceso a Cost Explorer")
+    logger.warning(f"⚠️  Recomendación: Verificar que las instancias tengan el tag:")
+    logger.warning(f"    aws:eks:cluster-name = {cluster_name}")
+
+    instance_types = Counter([inst['instance_type'] for inst in instances])
+    logger.info(f"")
+    logger.info(f"📊 Instancias detectadas:")
+    for itype, count in instance_types.most_common():
+        logger.info(f"   {itype}: {count} nodos")
+
+    return {
+        'monthly_cost': CONTROL_PLANE_MONTHLY,
+        'monthly_ondemand': 0,
+        'savings_amount': 0,
+        'savings_percentage': 0,
+        'ri_percentage': 0,
+        'sp_percentage': 0,
+        'by_service': {'Amazon Elastic Kubernetes Service': CONTROL_PLANE_MONTHLY},
+        'by_purchase': {},
+        'has_control_plane': True,
+        'data_source': 'Fallback (solo Control Plane)',
+        'warning': f'Tag aws:eks:cluster-name no encontrado. Solo se calculó Control Plane.',
+        'days_analyzed': days
+    }
+
+def get_control_plane_cost(cluster_name, region, days=30):
+    """
+    Obtiene el costo del Control Plane de EKS de manera separada
+
+    IMPORTANTE: El Control Plane de EKS NO tiene el tag aws:eks:cluster-name
+    (ese tag solo se aplica a los nodos EC2 del Data Plane).
+
+    Estrategia:
+    - Filtra por SERVICIO: "Amazon Elastic Kubernetes Service"
+    - Filtra por REGIÓN: La región del cluster
+
+    Limitación: Si hay múltiples clusters EKS en la misma región,
+    esta query sumará todos sus Control Planes. Para separar por cluster
+    específico, se necesitaría un tag adicional que AWS actualmente no provee.
+
+    Returns:
+        float: Costo mensual del Control Plane, o None si no se encuentra
+    """
+    logger.info(f"Consultando costo de Control Plane EKS para: {cluster_name}")
+    ce = boto3.client('ce', region_name='us-east-1')
+
     try:
-        # Terminar 2 días antes de hoy para evitar problemas de consolidación
         end_date = datetime.now().date() - timedelta(days=2)
         start_date = end_date - timedelta(days=days)
 
-        logger.info(f"Período de consulta: {start_date} a {end_date}")
+        # Query para EKS Control Plane
+        # Estrategia: Filtrar por servicio EKS + región
+        log_aws_api_call(logger, 'CostExplorer', 'get_cost_and_usage_control_plane', {
+            'cluster': cluster_name,
+            'service': 'Amazon Elastic Kubernetes Service',
+            'region': region
+        })
 
-        # Consulta optimizada usando aws:eks:cluster-name tag
+        response = ce.get_cost_and_usage(
+            TimePeriod={
+                'Start': start_date.strftime('%Y-%m-%d'),
+                'End': end_date.strftime('%Y-%m-%d')
+            },
+            Granularity='DAILY',
+            Metrics=['AmortizedCost'],
+            Filter={
+                'And': [
+                    {
+                        'Dimensions': {
+                            'Key': 'SERVICE',
+                            'Values': ['Amazon Elastic Kubernetes Service']
+                        }
+                    },
+                    {
+                        'Dimensions': {
+                            'Key': 'REGION',
+                            'Values': [region]
+                        }
+                    }
+                ]
+            }
+        )
+
+        total_cost = 0
+        for result in response['ResultsByTime']:
+            if 'Total' in result and 'AmortizedCost' in result['Total']:
+                total_cost += float(result['Total']['AmortizedCost']['Amount'])
+
+        actual_days = (end_date - start_date).days
+        monthly_cost = (total_cost / actual_days) * 30 if actual_days > 0 else 0
+
+        if monthly_cost > 0:
+            logger.info(f"✅ Control Plane EKS encontrado: ${monthly_cost:.2f}/mes")
+            log_aws_api_call(logger, 'CostExplorer', 'get_cost_and_usage_control_plane',
+                           result=f"${monthly_cost:.2f}/mes")
+            return monthly_cost
+        else:
+            logger.warning(f"⚠️  No se detectó costo de Control Plane para región {region}")
+            return None
+
+    except Exception as e:
+        logger.error(f"❌ Error obteniendo costo de Control Plane: {e}")
+        log_aws_api_call(logger, 'CostExplorer', 'get_cost_and_usage_control_plane', error=str(e))
+        return None
+
+def get_real_cost_from_cost_explorer(cluster_name, region, instances, days=30):
+    """
+    Obtiene costo real del cluster con análisis de ahorros
+    - Incluye Control Plane + Data Plane
+    - Calcula % ahorro por RIs y Savings Plans
+    - Fallback si no encuentra tag
+    """
+    logger.info(f"Consultando Cost Explorer para cluster: {cluster_name} (últimos {days} días)")
+    ce = boto3.client('ce', region_name='us-east-1')  # Cost Explorer siempre en us-east-1
+
+    try:
+        end_date = datetime.now().date() - timedelta(days=2)
+        start_date = end_date - timedelta(days=days)
+
+        logger.info(f"Período: {start_date} a {end_date}")
+
+        # ============================================
+        # QUERY 0: Control Plane (servicio EKS)
+        # ============================================
+        control_plane_cost_monthly = get_control_plane_cost(cluster_name, region, days)
+
+        # ============================================
+        # QUERY 1: Data Plane - Costo Real (con descuentos)
+        # ============================================
         log_aws_api_call(logger, 'CostExplorer', 'get_cost_and_usage', {
             'cluster': cluster_name,
             'start': start_date,
@@ -306,82 +453,157 @@ def get_real_cost_from_cost_explorer(cluster_name, region, instance_ids, days=30
                 'End': end_date.strftime('%Y-%m-%d')
             },
             Granularity='DAILY',
-            Metrics=['UnblendedCost', 'UsageQuantity'],
+            Metrics=['AmortizedCost', 'UsageQuantity'],  # ✅ Costo real con RIs/SPs
             Filter={
-                'And': [
-                    {
-                        'Dimensions': {
-                            'Key': 'SERVICE',
-                            'Values': ['Amazon Elastic Compute Cloud - Compute']
-                        }
-                    },
-                    {
-                        'Tags': {
-                            'Key': 'aws:eks:cluster-name',
-                            'Values': [cluster_name]
-                        }
-                    }
-                ]
+                'Tags': {
+                    'Key': 'aws:eks:cluster-name',
+                    'Values': [cluster_name]
+                }
             },
             GroupBy=[
-                {'Type': 'DIMENSION', 'Key': 'INSTANCE_TYPE'}
+                {'Type': 'DIMENSION', 'Key': 'SERVICE'},
+                {'Type': 'DIMENSION', 'Key': 'PURCHASE_TYPE'}  # ✅ Tipo de compra
             ]
         )
 
-        if not response['ResultsByTime']:
-            logger.warning("No se encontraron resultados en Cost Explorer")
-            log_aws_api_call(logger, 'CostExplorer', 'get_cost_and_usage',
-                           result="Sin resultados")
-            return None
+        # ============================================
+        # PROCESAR RESULTADOS
+        # ============================================
+        total_amortized = 0
+        cost_by_service = {}
+        cost_by_purchase = {
+            'on_demand': 0,
+            'reserved': 0,
+            'savings_plans': 0,
+            'spot': 0
+        }
 
-        # Calcular costo total y detalles por tipo de instancia
-        total_cost = 0
-        instance_type_costs = {}
-        days_with_data = 0
+        # Agregar Control Plane si se obtuvo
+        if control_plane_cost_monthly and control_plane_cost_monthly > 0:
+            # Convertir costo mensual a costo del período
+            control_plane_cost_period = (control_plane_cost_monthly / 30) * days
+            total_amortized += control_plane_cost_period
+            cost_by_service['Amazon Elastic Kubernetes Service'] = control_plane_cost_period
+            logger.info(f"Control Plane agregado: ${control_plane_cost_monthly:.2f}/mes")
+
+        # Si no hay resultados de Data Plane pero sí Control Plane, continuar
+        if not response['ResultsByTime']:
+            if control_plane_cost_monthly and control_plane_cost_monthly > 0:
+                logger.warning("⚠️  Tag 'aws:eks:cluster-name' no encontrado para Data Plane")
+                logger.info("✅ Pero se encontró costo de Control Plane")
+                # Continuar con solo Control Plane
+            else:
+                logger.warning("❌ No se encontraron costos ni para Control Plane ni Data Plane")
+                return calculate_fallback_cost(cluster_name, instances, region, days)
 
         for result in response['ResultsByTime']:
-            if result.get('Groups'):
-                days_with_data += 1
-                for group in result['Groups']:
-                    instance_type = group['Keys'][0]
-                    cost = float(group['Metrics']['UnblendedCost']['Amount'])
-                    usage = float(group['Metrics']['UsageQuantity']['Amount'])
+            for group in result.get('Groups', []):
+                service = group['Keys'][0]
+                purchase_option = group['Keys'][1] if len(group['Keys']) > 1 else 'Unknown'
 
-                    total_cost += cost
+                cost = float(group['Metrics']['AmortizedCost']['Amount'])
+                usage = float(group['Metrics']['UsageQuantity']['Amount'])
 
-                    if instance_type not in instance_type_costs:
-                        instance_type_costs[instance_type] = {'cost': 0, 'usage': 0}
-                    instance_type_costs[instance_type]['cost'] += cost
-                    instance_type_costs[instance_type]['usage'] += usage
+                total_amortized += cost
 
-        if total_cost > 0:
-            actual_days = (end_date - start_date).days
-            monthly_cost = (total_cost / actual_days) * 30 if actual_days > 0 else total_cost
+                # Por servicio
+                cost_by_service[service] = cost_by_service.get(service, 0) + cost
 
-            logger.info(f"Costo total en período: ${total_cost:.2f} ({days_with_data} días con datos)")
-            logger.info(f"Costo mensual proyectado: ${monthly_cost:.2f}")
+                # Por tipo de compra (normalizar nombres)
+                po_lower = purchase_option.lower()
+                if 'on demand' in po_lower or 'ondemand' in po_lower:
+                    cost_by_purchase['on_demand'] += cost
+                elif 'reserved' in po_lower or 'reservation' in po_lower:
+                    cost_by_purchase['reserved'] += cost
+                elif 'saving' in po_lower:
+                    cost_by_purchase['savings_plans'] += cost
+                elif 'spot' in po_lower:
+                    cost_by_purchase['spot'] += cost
 
-            # Log detalles por tipo de instancia
-            for inst_type, data in sorted(instance_type_costs.items(),
-                                         key=lambda x: x[1]['cost'], reverse=True):
-                logger.info(f"  {inst_type}: ${data['cost']:.2f} "
-                          f"({data['usage']:.2f} horas)")
+        if total_amortized == 0:
+            logger.warning("❌ No se encontraron costos en el período")
+            return calculate_fallback_cost(cluster_name, instances, region, days)
 
-            log_aws_api_call(logger, 'CostExplorer', 'get_cost_and_usage',
-                           result=f"${monthly_cost:.2f}/mes")
+        # ============================================
+        # CALCULAR COSTO ON-DEMAND EQUIVALENTE
+        # ============================================
+        total_ondemand_equivalent = calculate_ondemand_equivalent(
+            cost_by_purchase, total_amortized
+        )
 
-            return round(monthly_cost, 2)
+        # ============================================
+        # CALCULAR AHORROS
+        # ============================================
+        actual_days = (end_date - start_date).days
+        monthly_cost = (total_amortized / actual_days) * 30
+        monthly_ondemand = (total_ondemand_equivalent / actual_days) * 30
+
+        total_savings_amount = monthly_ondemand - monthly_cost
+        savings_percentage = (total_savings_amount / monthly_ondemand * 100) if monthly_ondemand > 0 else 0
+
+        # Desglose de ahorros
+        ri_percentage = (cost_by_purchase['reserved'] / total_amortized * 100) if total_amortized > 0 else 0
+        sp_percentage = (cost_by_purchase['savings_plans'] / total_amortized * 100) if total_amortized > 0 else 0
+
+        # ============================================
+        # LOGGING DETALLADO
+        # ============================================
+        logger.info(f"")
+        logger.info(f"{'='*60}")
+        logger.info(f"📊 ANÁLISIS DE COSTOS - {cluster_name}")
+        logger.info(f"{'='*60}")
+        logger.info(f"")
+        logger.info(f"💰 COSTOS MENSUALES:")
+        logger.info(f"   Costo Real:       ${monthly_cost:>10.2f}/mes")
+        logger.info(f"   Costo On-Demand:  ${monthly_ondemand:>10.2f}/mes")
+        logger.info(f"   Ahorro Total:     ${total_savings_amount:>10.2f}/mes ({savings_percentage:.1f}%)")
+        logger.info(f"")
+        logger.info(f"📋 DESGLOSE POR TIPO DE COMPRA:")
+        logger.info(f"   On-Demand:        ${cost_by_purchase['on_demand']:>10.2f} ({cost_by_purchase['on_demand']/total_amortized*100:>5.1f}%)")
+        logger.info(f"   Reserved Inst.:   ${cost_by_purchase['reserved']:>10.2f} ({ri_percentage:>5.1f}%)")
+        logger.info(f"   Savings Plans:    ${cost_by_purchase['savings_plans']:>10.2f} ({sp_percentage:>5.1f}%)")
+        if cost_by_purchase['spot'] > 0:
+            logger.info(f"   Spot:             ${cost_by_purchase['spot']:>10.2f} ({cost_by_purchase['spot']/total_amortized*100:>5.1f}%)")
+        logger.info(f"")
+        logger.info(f"🏗️  DESGLOSE POR SERVICIO:")
+        for service, cost in sorted(cost_by_service.items(), key=lambda x: x[1], reverse=True):
+            service_monthly = (cost / actual_days) * 30
+            service_name = service.replace('Amazon ', '').replace('Elastic ', 'E')[:30]
+            logger.info(f"   {service_name:<30} ${service_monthly:>10.2f}/mes")
+        logger.info(f"{'='*60}")
+
+        # Verificar si hay control plane (ahora se busca explícitamente)
+        has_control_plane = 'Amazon Elastic Kubernetes Service' in cost_by_service
+        if not has_control_plane:
+            logger.warning(f"⚠️  No se detectó costo de Control Plane (debería ser ~$72/mes)")
+            logger.warning(f"⚠️  Verifica que el cluster esté activo en la región {region}")
         else:
-            logger.warning("No se encontraron costos en el período consultado")
-            log_aws_api_call(logger, 'CostExplorer', 'get_cost_and_usage',
-                           result="Sin costos")
-            return None
+            cp_cost = cost_by_service['Amazon Elastic Kubernetes Service']
+            cp_monthly = (cp_cost / actual_days) * 30
+            logger.info(f"✅ Control Plane detectado: ${cp_monthly:.2f}/mes")
+
+        log_aws_api_call(logger, 'CostExplorer', 'get_cost_and_usage',
+                       result=f"${monthly_cost:.2f}/mes (ahorro: {savings_percentage:.1f}%)")
+
+        return {
+            'monthly_cost': round(monthly_cost, 2),
+            'monthly_ondemand': round(monthly_ondemand, 2),
+            'savings_amount': round(total_savings_amount, 2),
+            'savings_percentage': round(savings_percentage, 1),
+            'ri_percentage': round(ri_percentage, 1),
+            'sp_percentage': round(sp_percentage, 1),
+            'by_service': {k: round((v/actual_days)*30, 2) for k, v in cost_by_service.items()},
+            'by_purchase': cost_by_purchase,
+            'has_control_plane': has_control_plane,
+            'data_source': 'Cost Explorer',
+            'days_analyzed': actual_days
+        }
 
     except Exception as e:
-        logger.error(f"Error consultando Cost Explorer: {e}")
+        logger.error(f"❌ Error en Cost Explorer: {e}")
         log_aws_api_call(logger, 'CostExplorer', 'get_cost_and_usage', error=str(e))
-        print(f"⚠️  No se pudo obtener costo de Cost Explorer: {e}", file=sys.stderr)
-        return None
+        print(f"⚠️  Error consultando Cost Explorer: {e}", file=sys.stderr)
+        return calculate_fallback_cost(cluster_name, instances, region, days)
 
 def main():
     logger.info("=== INICIANDO RECOLECTOR AWS ===")
@@ -496,17 +718,38 @@ def main():
     
     # Obtener costo real desde Cost Explorer
     print(f"⏳ Consultando costo real en Cost Explorer...", file=sys.stderr)
-    real_cost = get_real_cost_from_cost_explorer(cluster_name, region, instances)
-    
-    if real_cost:
-        logger.info(f"Costo real obtenido: ${real_cost:.2f}/mes")
-        print(f"✅ Costo real EC2 (últimos 30 días): ${real_cost:.2f}/mes", file=sys.stderr)
-        print(f"   (incluye Savings Plans / Reserved Instances si aplica)", file=sys.stderr)
+    cost_data = get_real_cost_from_cost_explorer(cluster_name, region, instances)
+
+    # Mostrar resultados al usuario
+    if cost_data and cost_data.get('monthly_cost', 0) > 0:
+        print(f"", file=sys.stderr)
+        print(f"✅ Costo real obtenido de {cost_data['data_source']}", file=sys.stderr)
+        print(f"   Costo mensual:    ${cost_data['monthly_cost']:.2f}/mes", file=sys.stderr)
+
+        if cost_data.get('savings_percentage', 0) > 0:
+            print(f"   Costo On-Demand:  ${cost_data['monthly_ondemand']:.2f}/mes", file=sys.stderr)
+            print(f"   💰 Ahorro total:  ${cost_data['savings_amount']:.2f}/mes ({cost_data['savings_percentage']}%)", file=sys.stderr)
+            print(f"", file=sys.stderr)
+            if cost_data.get('ri_percentage', 0) > 0:
+                print(f"      - Reserved Instances: {cost_data['ri_percentage']}%", file=sys.stderr)
+            if cost_data.get('sp_percentage', 0) > 0:
+                print(f"      - Savings Plans:      {cost_data['sp_percentage']}%", file=sys.stderr)
+
+        if not cost_data.get('has_control_plane', True):
+            print(f"   ⚠️  Control Plane no detectado en costos", file=sys.stderr)
+
+        if cost_data.get('warning'):
+            print(f"", file=sys.stderr)
+            print(f"   ⚠️  {cost_data['warning']}", file=sys.stderr)
     else:
-        logger.warning("No se pudo obtener costo real, se usarán precios On-Demand")
-        print(f"⚠️  No se pudo obtener costo real, se usarán precios On-Demand", file=sys.stderr)
-        real_cost = 0
-    
+        logger.warning("No se pudo obtener costo real")
+        print(f"⚠️  No se pudo obtener costo real", file=sys.stderr)
+        cost_data = {
+            'monthly_cost': 0,
+            'savings_percentage': 0,
+            'data_source': 'No disponible'
+        }
+
     # Generar variables de entorno (a stdout)
     env_vars = {
         'EKS_PRIMARY_INSTANCE': primary_instance,
@@ -514,8 +757,11 @@ def main():
         'EKS_UTIL_CPU': str(cpu_util),
         'EKS_UTIL_MEM': str(mem_util),
         'AWS_REGION': region,
-        'EKS_MONTHLY_COST': str(real_cost),
-        'EKS_METRIC_SOURCE': metric_source
+        'EKS_MONTHLY_COST': str(cost_data.get('monthly_cost', 0)),
+        'EKS_MONTHLY_COST_ONDEMAND': str(cost_data.get('monthly_ondemand', 0)),
+        'EKS_SAVINGS_PERCENTAGE': str(cost_data.get('savings_percentage', 0)),
+        'EKS_METRIC_SOURCE': metric_source,
+        'EKS_COST_SOURCE': cost_data.get('data_source', 'Unknown')
     }
 
     logger.info(f"Variables generadas: {env_vars}")

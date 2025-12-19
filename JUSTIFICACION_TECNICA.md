@@ -2,7 +2,7 @@
 
 Este documento justifica cada cálculo realizado en la calculadora con referencias a documentación oficial de AWS y Kubernetes.
 
-**Última actualización:** Diciembre 2025
+**Última actualización:** 19 de Diciembre 2025
 
 ---
 
@@ -465,7 +465,83 @@ Este cálculo representa el **ahorro en tiempo de ingeniería** por eliminar tar
 
 ---
 
-## 6. Limitaciones Reconocidas
+## 6. Análisis de Ahorros con Savings Plans y Reserved Instances
+
+### 6.1 Cálculo de Costo On-Demand Equivalente
+
+**Nueva funcionalidad en v2.3.0:**
+
+El script ahora calcula el **costo On-Demand equivalente** cuando detecta que se están usando Reserved Instances o Savings Plans. Esto permite comparar manzanas con manzanas.
+
+**Cálculo en el código** (`recolector_eks_aws.py:285-298`):
+```python
+def calculate_ondemand_equivalent(cost_by_purchase, total_amortized):
+    """
+    Calcula el costo On-Demand equivalente cuando hay RIs/SPs
+    Asume que RIs dan ~30% descuento y SPs ~10-20%
+    """
+    RI_DISCOUNT = 0.30  # 30% descuento típico
+    SP_DISCOUNT = 0.15  # 15% descuento típico
+
+    ondemand_from_ri = cost_by_purchase['reserved'] / (1 - RI_DISCOUNT)
+    ondemand_from_sp = cost_by_purchase['savings_plans'] / (1 - SP_DISCOUNT)
+    ondemand_direct = cost_by_purchase['on_demand']
+
+    return ondemand_from_ri + ondemand_from_sp + ondemand_direct + cost_by_purchase['spot']
+```
+
+**Justificación:**
+- **Reserved Instances:** Típicamente ofrecen ~30% de descuento vs On-Demand
+- **Savings Plans:** Típicamente ofrecen ~10-20% de descuento (usamos 15% conservador)
+- **Spot Instances:** Se suman sin ajuste (ya son descuento variable)
+- **On-Demand:** Se suman directamente
+
+Esta estimación permite mostrar al usuario cuánto ahorro real tiene actualmente y cómo se mantendría al migrar a Auto Mode.
+
+**Fuentes oficiales:**
+- [AWS Savings Plans - AWS](https://aws.amazon.com/savingsplans/pricing/)
+- [Amazon EC2 Reserved Instances Pricing - AWS](https://aws.amazon.com/ec2/pricing/reserved-instances/pricing/)
+
+### 6.2 Desglose por Tipo de Compra
+
+El script ahora analiza los costos desglosados por:
+- **On-Demand:** Costo sin descuentos
+- **Reserved Instances:** Costo con descuento de RIs
+- **Savings Plans:** Costo con descuento de SPs
+- **Spot:** Costo con descuento variable de Spot
+
+**Logging detallado:**
+```
+📋 DESGLOSE POR TIPO DE COMPRA:
+   On-Demand:        $    150.00 ( 15.0%)
+   Reserved Inst.:   $    500.00 ( 50.0%)
+   Savings Plans:    $    300.00 ( 30.0%)
+   Spot:             $     50.00 (  5.0%)
+```
+
+Esto permite al usuario entender exactamente de dónde vienen sus ahorros actuales.
+
+### 6.3 Variables de Entorno Extendidas
+
+El script ahora exporta variables adicionales para análisis completo:
+
+| Variable | Descripción | Ejemplo |
+|----------|-------------|---------|
+| `EKS_MONTHLY_COST` | Costo real con descuentos | `1200.50` |
+| `EKS_MONTHLY_COST_ONDEMAND` | Equivalente On-Demand | `1500.00` |
+| `EKS_SAVINGS_PERCENTAGE` | % de ahorro | `20.0` |
+| `EKS_METRIC_SOURCE` | Fuente de métricas | `Container Insights` |
+| `EKS_COST_SOURCE` | Fuente del costo | `Cost Explorer` |
+
+**Ventajas:**
+- ✅ Transparencia total sobre ahorros actuales
+- ✅ Comparación justa con Auto Mode
+- ✅ Datos para análisis FinOps externos
+- ✅ Trazabilidad de fuentes de datos
+
+---
+
+## 7. Limitaciones Reconocidas
 
 El README documenta honestamente las limitaciones:
 
@@ -478,17 +554,20 @@ El README documenta honestamente las limitaciones:
 - ✅ **Soporte multi-región:** Soporta múltiples regiones de AWS
 - ✅ **Fee de Auto Mode desde API:** Obtiene precios reales del fee por tipo de instancia
 - ✅ **Métricas reales opcionales:** Puede usar CloudWatch Container Insights si está disponible
-- ✅ **Integración con Cost Explorer:** Soporta costos reales vía variable `EKS_MONTHLY_COST`
+- ✅ **Integración con Cost Explorer:** Obtiene costos reales con análisis completo de descuentos
+- ✅ **Análisis de ahorros detallado:** Desglose por tipo de compra (RI, Savings Plans, Spot)
+- ✅ **Cálculo de equivalente On-Demand:** Estima el costo sin descuentos para comparación
 - ✅ **Consulta optimizada:** Cost Explorer termina 2 días antes para evitar datos no consolidados
 - ✅ **Referencias de pricing:** Incluye enlaces a documentación oficial al final del reporte
 - ✅ **Sistema de logging completo:** Logs detallados en carpeta `logs/` configurable vía `EKS_CALCULATOR_LOG_DIR`
+- ✅ **Variables de entorno extendidas:** 10 variables exportadas para análisis completo
 - ✅ **Organización mejorada:** Documentación centralizada en README, archivos temporales eliminados
 
 Estas limitaciones están documentadas en el README para transparencia.
 
 ---
 
-## Resumen de Fuentes Oficiales
+## 8. Resumen de Fuentes Oficiales
 
 ### AWS (Documentación Oficial)
 1. [Automate cluster infrastructure with EKS Auto Mode](https://docs.aws.amazon.com/eks/latest/userguide/automode.html)
@@ -498,15 +577,26 @@ Estas limitaciones están documentadas en el README para transparencia.
 5. [Managed Kubernetes – Amazon EKS Auto Mode](https://aws.amazon.com/eks/auto-mode/)
 6. [Streamline Kubernetes cluster management with EKS Auto Mode](https://aws.amazon.com/blogs/aws/streamline-kubernetes-cluster-management-with-new-amazon-eks-auto-mode/)
 7. [New Amazon EKS Auto Mode features](https://aws.amazon.com/blogs/containers/new-amazon-eks-auto-mode-features-for-enhanced-security-network-control-and-performance/)
+8. [AWS Savings Plans](https://aws.amazon.com/savingsplans/pricing/)
+9. [Amazon EC2 Reserved Instances Pricing](https://aws.amazon.com/ec2/pricing/reserved-instances/pricing/)
+10. [AWS Cost Explorer](https://aws.amazon.com/aws-cost-management/aws-cost-explorer/)
+11. [Using Container Insights - Amazon CloudWatch](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/ContainerInsights.html)
+12. [Container Insights Metrics - Amazon EKS](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Container-Insights-metrics-EKS.html)
 
 ### Kubernetes (Documentación Oficial)
 1. [Resource Management for Pods and Containers](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/)
 2. [Assign CPU Resources to Containers and Pods](https://kubernetes.io/docs/tasks/configure-pod-container/assign-cpu-resource/)
 3. [Resource Quotas](https://kubernetes.io/docs/concepts/policy/resource-quotas/)
 
+### Terceros Confiables
+1. [EKS Auto Mode & Karpenter - nOps](https://www.nops.io/blog/revolutionizing-kubernetes-management-with-eks-auto-mode-karpenter/)
+2. [Datadog: State of Kubernetes](https://www.datadoghq.com/container-report/)
+3. [Fairwinds: Kubernetes Efficiency](https://www.fairwinds.com/)
+4. [CNCF Annual Survey](https://www.cncf.io/reports/cncf-annual-survey-2024/)
+
 ---
 
-## Conclusión
+## 9. Conclusión
 
 Todos los cálculos del proyecto están basados en:
 
